@@ -131,14 +131,18 @@ with tab_gov:
     
     col_filter1, col_filter2 = st.columns(2)
     with col_filter1:
-        type_filter = st.multiselect("Filter by Type", options=df['type'].unique() if not df.empty else [])
+        # Check if 'type' column exists before filtering
+        if 'type' in df.columns:
+            type_filter = st.multiselect("Filter by Type", options=df['type'].unique() if not df.empty else [])
     with col_filter2:
-        status_filter = st.multiselect("Filter by Status", options=["New", "Pending", "In Progress", "Resolved"])
+        # Check if 'status' column exists before filtering
+        if 'status' in df.columns:
+            status_filter = st.multiselect("Filter by Status", options=["New", "Pending", "In Progress", "Resolved"])
 
     if not df.empty:
-        if type_filter:
+        if 'type' in df.columns and type_filter:
             df = df[df['type'].isin(type_filter)]
-        if status_filter:
+        if 'status' in df.columns and status_filter:
             df = df[df['status'].isin(status_filter)]
 
     # Map
@@ -153,11 +157,18 @@ with tab_gov:
     if not df.empty:
         for _, row in df.iterrows():
             color = "red" if row['priority'] > 80 else "orange" if row['priority'] > 50 else "green"
+            
+            # --- BUG FIX START ---
+            # Use .get() to safely access keys that might be missing in old records
+            loc_name = row.get('location_name', 'Unknown Location')
+            notes = row.get('user_notes', 'No description provided.')
+            # --- BUG FIX END ---
+
             # Enhanced Popup with User Details
             popup_html = f"""
             <b>{row['type']}</b><br>
-            Loc: {row['location_name']}<br>
-            Note: {row['user_notes']}<br>
+            Loc: {loc_name}<br>
+            Note: {notes}<br>
             Priority: {row['priority']}<br>
             Status: {row['status']}
             """
@@ -175,19 +186,23 @@ with tab_gov:
     if not df.empty:
         col_list, col_action = st.columns([2, 1])
         with col_list:
-            # Display new columns in the table
+            # Filter columns to only show existing ones to prevent KeyError
+            cols_to_show = ['id', 'type', 'priority', 'location_name', 'user_notes', 'status']
+            available_cols = [c for c in cols_to_show if c in df.columns]
+            
             st.dataframe(
-                df[['id', 'type', 'priority', 'location_name', 'user_notes', 'status']], 
+                df[available_cols], 
                 hide_index=True, use_container_width=True
             )
         
         with col_action:
             st.markdown("#### Action Panel")
-            report_ids = df[df['status'] != 'Resolved']['id'].tolist()
-            if report_ids:
-                selected_id = st.selectbox("Select Report ID", report_ids)
-                new_status = st.selectbox("Update Status", ["In Progress", "Resolved", "False Alarm"])
-                if st.button("Update & Dispatch"):
-                    st.session_state.city.update_status(selected_id, new_status)
-                    st.success(f"Updated {selected_id}")
-                    st.rerun()
+            if 'status' in df.columns and 'id' in df.columns:
+                report_ids = df[df['status'] != 'Resolved']['id'].tolist()
+                if report_ids:
+                    selected_id = st.selectbox("Select Report ID", report_ids)
+                    new_status = st.selectbox("Update Status", ["In Progress", "Resolved", "False Alarm"])
+                    if st.button("Update & Dispatch"):
+                        st.session_state.city.update_status(selected_id, new_status)
+                        st.success(f"Updated {selected_id}")
+                        st.rerun()
