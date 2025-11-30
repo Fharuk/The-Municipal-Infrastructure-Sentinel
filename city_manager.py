@@ -10,6 +10,7 @@ class CityManager:
     Manages the state of infrastructure reports in memory (Session State).
     """
     def __init__(self):
+        # Initialize session state storage if it doesn't exist
         if 'reports_db' not in st.session_state:
             st.session_state.reports_db = []
             self.seed_mock_data()
@@ -39,14 +40,15 @@ class CityManager:
                 user_notes=data['notes']
             )
 
+    # UPDATED SIGNATURE: Added location_name and user_notes with defaults
     def add_report(self, lat: float, lon: float, vision_data: dict, priority_data: dict, user_id: str, location_name: str = "Unknown", user_notes: str = ""):
         """Adds a new report with user-provided context."""
         new_report = {
             "id": f"R{len(st.session_state.reports_db) + 1:03d}",
             "lat": lat,
             "lon": lon,
-            "location_name": location_name, # New Field
-            "user_notes": user_notes,       # New Field
+            "location_name": location_name, 
+            "user_notes": user_notes,       
             "type": vision_data.get('defect_type', 'Unknown'),
             "severity": vision_data.get('severity_score', 0),
             "priority": priority_data.get('priority_index', 0.0),

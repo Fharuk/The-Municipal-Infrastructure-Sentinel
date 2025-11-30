@@ -131,11 +131,9 @@ with tab_gov:
     
     col_filter1, col_filter2 = st.columns(2)
     with col_filter1:
-        # Check if 'type' column exists before filtering
         if 'type' in df.columns:
             type_filter = st.multiselect("Filter by Type", options=df['type'].unique() if not df.empty else [])
     with col_filter2:
-        # Check if 'status' column exists before filtering
         if 'status' in df.columns:
             status_filter = st.multiselect("Filter by Status", options=["New", "Pending", "In Progress", "Resolved"])
 
@@ -158,13 +156,9 @@ with tab_gov:
         for _, row in df.iterrows():
             color = "red" if row['priority'] > 80 else "orange" if row['priority'] > 50 else "green"
             
-            # --- BUG FIX START ---
-            # Use .get() to safely access keys that might be missing in old records
             loc_name = row.get('location_name', 'Unknown Location')
             notes = row.get('user_notes', 'No description provided.')
-            # --- BUG FIX END ---
 
-            # Enhanced Popup with User Details
             popup_html = f"""
             <b>{row['type']}</b><br>
             Loc: {loc_name}<br>
@@ -186,7 +180,6 @@ with tab_gov:
     if not df.empty:
         col_list, col_action = st.columns([2, 1])
         with col_list:
-            # Filter columns to only show existing ones to prevent KeyError
             cols_to_show = ['id', 'type', 'priority', 'location_name', 'user_notes', 'status']
             available_cols = [c for c in cols_to_show if c in df.columns]
             
