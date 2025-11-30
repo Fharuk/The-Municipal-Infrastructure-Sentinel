@@ -6,7 +6,7 @@ from streamlit_folium import st_folium
 import os
 import logging
 
-# Internal Modules (Corrected Imports)
+# Internal Modules
 from civic_agent_core import CivicAgentCore
 from city_manager import CityManager
 
@@ -68,7 +68,15 @@ with tab_citizen:
     
     with col_input:
         st.subheader("New Incident Report")
+        
         reporter_name = st.text_input("Your Name (For Leaderboard)", value="Anonymous")
+        
+        # Enhanced Input Section
+        st.markdown("---")
+        st.caption("Incident Details")
+        location_name = st.text_input("Location Name", placeholder="e.g., Junction of Broad St & Marina")
+        user_notes = st.text_area("Description", placeholder="Describe the issue (e.g., Deep hole causing traffic, drainage blocked by trash)")
+        
         img_file = st.file_uploader("Upload Scene Photo", type=['jpg', 'png', 'jpeg'])
         
         st.caption("Location Metadata (Simulated GPS)")
@@ -90,7 +98,7 @@ with tab_citizen:
                     vision_result = st.session_state.agent.vision_agent(image)
                     
                     if not vision_result.get('is_relevant', True):
-                        st.error("❌ Image Rejected: Not municipal infrastructure.")
+                        st.error("❌ Image Rejected: Not identified as municipal infrastructure.")
                     else:
                         defect = vision_result.get('defect_type', 'Unknown')
                         severity = vision_result.get('severity_score', 0)
@@ -99,7 +107,11 @@ with tab_citizen:
                         with st.spinner("AI Planner calculating priority..."):
                             priority_result = st.session_state.agent.prioritization_agent(vision_result, location_type)
                             
-                            report = st.session_state.city.add_report(lat, lon, vision_result, priority_result, reporter_name)
+                            # Pass new fields to CityManager
+                            report = st.session_state.city.add_report(
+                                lat, lon, vision_result, priority_result, reporter_name,
+                                location_name=location_name, user_notes=user_notes
+                            )
                             
                             if report:
                                 if report['priority'] > 80:
@@ -107,7 +119,9 @@ with tab_citizen:
                                     st.error(f"🚨 Priority: {report['priority']} (Immediate)")
                                 else:
                                     st.success(f"✅ Priority: {report['priority']} (Logged)")
+                                
                                 st.write(f"**Justification:** {priority_result.get('justification')}")
+                                st.success("Report logged. Thank you for your contribution!")
 
 # --- TAB 2: GOVERNMENT DASHBOARD ---
 with tab_gov:
@@ -139,10 +153,18 @@ with tab_gov:
     if not df.empty:
         for _, row in df.iterrows():
             color = "red" if row['priority'] > 80 else "orange" if row['priority'] > 50 else "green"
-            popup_html = f"<b>{row['type']}</b><br>Priority: {row['priority']}<br>Status: {row['status']}"
+            # Enhanced Popup with User Details
+            popup_html = f"""
+            <b>{row['type']}</b><br>
+            Loc: {row['location_name']}<br>
+            Note: {row['user_notes']}<br>
+            Priority: {row['priority']}<br>
+            Status: {row['status']}
+            """
             folium.Marker(
                 [row['lat'], row['lon']],
                 popup=popup_html,
+                tooltip=f"{row['type']} ({row['severity']}/10)",
                 icon=folium.Icon(color=color, icon="info-sign")
             ).add_to(m)
 
@@ -153,7 +175,11 @@ with tab_gov:
     if not df.empty:
         col_list, col_action = st.columns([2, 1])
         with col_list:
-            st.dataframe(df[['id', 'type', 'priority', 'dept', 'status']], hide_index=True, use_container_width=True)
+            # Display new columns in the table
+            st.dataframe(
+                df[['id', 'type', 'priority', 'location_name', 'user_notes', 'status']], 
+                hide_index=True, use_container_width=True
+            )
         
         with col_action:
             st.markdown("#### Action Panel")
