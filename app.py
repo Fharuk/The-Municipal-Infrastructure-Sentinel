@@ -1,189 +1,425 @@
 import streamlit as st
-from PIL import Image
-import pandas as pd
-import folium
-from streamlit_folium import st_folium
-import os
+import time
+import json
 import logging
+import os
+from typing import Dict, List, Any, Optional
+
+# Third-party libraries
+from firebase_admin import credentials, initialize_app, firestore
+from firebase_admin import auth as firebase_auth
+# Removed faulty imports: from google.cloud.firestore import client and Query
 
 # Internal Modules
-from civic_agent_core import CivicAgentCore
-from city_manager import CityManager
+from agent_core import AgentCore
+from curriculum_manager import CurriculumManager
 
-# Page Config
-st.set_page_config(layout="wide", page_title="Municipal Sentinel")
+# --- CONFIGURATION & LOGGING ---
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- SECURE INIT ---
-def get_api_key():
-    if "GEMINI_API_KEY" in st.secrets:
-        return st.secrets["GEMINI_API_KEY"]
-    env_key = os.environ.get("GEMINI_API_KEY")
-    if env_key:
-        return env_key
-    return None
+# Default model, following the user's latest preference
+DEFAULT_MODEL = 'gemini-2.5-flash-preview-09-2025' 
+PASS_THRESHOLD = 0.70 
 
-api_key = get_api_key()
+# --- FIREBASE INTEGRATION (P1: Persistence & LTM) ---
 
-if 'city' not in st.session_state:
-    st.session_state.city = CityManager()
+def init_firebase() -> tuple[Optional[firestore.client], str]:
+    """Initializes Firebase Admin SDK and authenticates the user."""
+    # Use existing client if already initialized
+    if 'firebase_initialized' in st.session_state and st.session_state.firebase_initialized:
+        db = firestore.client()
+        return db, st.session_state.user_id
 
-if 'agent' not in st.session_state:
-    if api_key:
-        st.session_state.agent = CivicAgentCore(api_key)
-    else:
-        st.session_state.agent = None
-
-# --- SIDEBAR (Gamified) ---
-with st.sidebar:
-    st.title("🛡️ Sentinel Control")
-    
-    if st.session_state.agent:
-        st.success("System Online (Secure Key)")
-    else:
-        st.error("System Offline")
-
-    st.markdown("---")
-    st.subheader("📊 Live Impact")
-    stats = st.session_state.city.get_stats()
-    c1, c2 = st.columns(2)
-    c1.metric("Reports", stats['total'])
-    c2.metric("Critical", stats['critical'])
-    
-    st.markdown("---")
-    st.subheader("🏆 Top Reporters")
-    leaderboard = st.session_state.city.get_leaderboard()
-    if not leaderboard.empty:
-        st.dataframe(leaderboard, hide_index=True, use_container_width=True)
-
-# --- MAIN UI ---
-st.title("🏙️ Municipal Infrastructure Sentinel")
-st.markdown("AI-Powered Infrastructure Triage System. **Map Provider: OpenStreetMap**")
-
-tab_citizen, tab_gov = st.tabs(["📢 Citizen Reporter", "🗺️ Government Command"])
-
-# --- TAB 1: CITIZEN REPORTING (Path A) ---
-with tab_citizen:
-    col_input, col_analysis = st.columns([1, 1])
-    
-    with col_input:
-        st.subheader("New Incident Report")
+    try:
+        app_id = os.environ.get('__app_id', 'default-app-id')
+        firebase_config_str = os.environ.get('__firebase_config')
+        auth_token = os.environ.get('__initial_auth_token')
         
-        # Gamification: Identity
-        reporter_name = st.text_input("Your Name (For Leaderboard)", value="Anonymous")
+        if not firebase_config_str:
+            return None, "anonymous"
+
+        firebase_config = json.loads(firebase_config_str)
         
-        img_file = st.file_uploader("Upload Scene Photo", type=['jpg', 'png', 'jpeg'])
+        if not firestore._apps: # Check if the app is already initialized
+            cred = credentials.Certificate(firebase_config)
+            initialize_app(cred)
+
+        db = firestore.client()
         
-        st.caption("Location Metadata (Simulated GPS)")
-        lat = st.number_input("Latitude", value=6.5244, format="%.4f")
-        lon = st.number_input("Longitude", value=3.3792, format="%.4f")
-        location_type = st.selectbox("Context", ["Highway", "Residential", "Market", "School Zone"])
+        user_id = "anonymous"
+        if auth_token:
+            try:
+                decoded_token = firebase_auth.verify_id_token(auth_token)
+                user_id = decoded_token['uid']
+            except Exception as e:
+                logger.error("Failed to verify auth token: %s", e)
+
+        st.session_state.app_id = app_id
+        st.session_state.user_id = user_id
+        st.session_state.firebase_initialized = True
+        return db, user_id
         
-        submit_btn = st.button("Analyze & Submit")
+    except Exception as e:
+        logger.error("Fatal Firebase Initialization Error: %s", e)
+        return None, None
 
-    with col_analysis:
-        if submit_btn and img_file:
-            if not st.session_state.agent:
-                st.error("AI Agent not initialized.")
-            else:
-                image = Image.open(img_file)
-                st.image(image, caption="Evidence", width=300)
-                
-                with st.spinner("AI Vision analyzing defect..."):
-                    vision_result = st.session_state.agent.vision_agent(image)
-                    
-                    # 1. Relevance Check
-                    if not vision_result.get('is_relevant', True):
-                        st.error("❌ Image Rejected: Not identified as municipal infrastructure.")
-                        st.stop()
+def get_session_doc_ref(db: firestore.client, user_id: str, topic: str):
+    """Returns the document reference for the current curriculum session."""
+    app_id = st.session_state.get('app_id', 'default-app-id')
+    topic_doc_id = topic.lower().replace(' ', '_').replace('/', '_')
+    collection_path = f"artifacts/{app_id}/users/{user_id}/curriculum_sessions"
+    return db.collection(collection_path).document(topic_doc_id)
 
-                    defect = vision_result.get('defect_type', 'Unknown')
-                    severity = vision_result.get('severity_score', 0)
-                    st.info(f"Detected: **{defect}** | Severity: **{severity}/10**")
-                    
-                with st.spinner("AI Planner calculating priority..."):
-                    priority_result = st.session_state.agent.prioritization_agent(vision_result, location_type)
-                    
-                    # Save to Memory
-                    report = st.session_state.city.add_report(lat, lon, vision_result, priority_result, reporter_name)
-                    
-                    if report:
-                        # Gamification: Celebration
-                        if report['priority'] > 80:
-                            st.balloons()
-                            st.error(f"🚨 Priority: {report['priority']} (Immediate)")
-                        else:
-                            st.success(f"✅ Priority: {report['priority']} (Logged)")
-                        
-                        st.write(f"**Justification:** {priority_result.get('justification')}")
-                        st.info(f"Thank you, {reporter_name}! You earned +10 Impact Points.")
+def load_curriculum_state(db: firestore.client, user_id: str, topic: str) -> Optional[CurriculumManager]:
+    """Loads curriculum state from Firestore."""
+    try:
+        doc_ref = get_session_doc_ref(db, user_id, topic)
+        doc = doc_ref.get()
+        if doc.exists:
+            logger.info("P1 Trace: Loaded state from Firestore.")
+            return CurriculumManager.deserialize(doc.to_dict())
+        return None
+    except Exception as e:
+        logger.error("Failed to load state from Firestore: %s", e)
+        return None
 
-# --- TAB 2: GOVERNMENT DASHBOARD (Path B) ---
-with tab_gov:
-    st.subheader("Operational Heatmap")
-    
-    # 1. Filters (Operational Pivot)
-    df = st.session_state.city.get_dataframe()
-    
-    col_filter1, col_filter2 = st.columns(2)
-    with col_filter1:
-        type_filter = st.multiselect("Filter by Defect Type", options=df['type'].unique() if not df.empty else [])
-    with col_filter2:
-        status_filter = st.multiselect("Filter by Status", options=["New", "Pending", "In Progress", "Resolved"])
+def save_curriculum_state(db: firestore.client, user_id: str, manager: CurriculumManager):
+    """Saves current curriculum state to Firestore."""
+    if not manager.topic: 
+        return
+    try:
+        doc_ref = get_session_doc_ref(db, user_id, manager.topic)
+        doc_ref.set(manager.serialize())
+        logger.info("P1 Trace: State saved to Firestore.")
+    except Exception as e:
+        logger.error("Failed to save state to Firestore: %s", e)
 
-    # Apply Filters
-    if not df.empty:
-        if type_filter:
-            df = df[df['type'].isin(type_filter)]
-        if status_filter:
-            df = df[df['status'].isin(status_filter)]
+# --- LTM (Long-Term Memory) Helpers ---
 
-    # 2. Map
-    if not df.empty:
-        center_lat = df['lat'].mean()
-        center_lon = df['lon'].mean()
-    else:
-        center_lat, center_lon = 6.5244, 3.3792
+def get_ltm_collection_ref(db: firestore.client, user_id: str):
+    """Returns the collection reference for quiz attempts."""
+    app_id = st.session_state.get('app_id', 'default-app-id')
+    ltm_collection_path = f"artifacts/{app_id}/users/{user_id}/quiz_attempts"
+    return db.collection(ltm_collection_path)
 
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=12)
-    
-    if not df.empty:
-        for _, row in df.iterrows():
-            color = "red" if row['priority'] > 80 else "orange" if row['priority'] > 50 else "green"
-            # Add Status to popup
-            popup_html = f"<b>{row['type']}</b><br>Priority: {row['priority']}<br>Status: {row['status']}<br>ID: {row['id']}"
-            folium.Marker(
-                [row['lat'], row['lon']],
-                popup=popup_html,
-                tooltip=f"{row['type']} ({row['severity']}/10)",
-                icon=folium.Icon(color=color, icon="info-sign")
-            ).add_to(m)
+def log_quiz_attempt(db: firestore.client, user_id: str, node_id: str, is_correct: bool):
+    """Logs the result of a quiz attempt to the LTM database."""
+    if not db: 
+        return
+    try:
+        ltm_ref = get_ltm_collection_ref(db, user_id)
+        ltm_ref.add({
+            'timestamp': firestore.SERVER_TIMESTAMP,
+            'node_id': node_id,
+            'topic': st.session_state.curriculum.topic,
+            'status': 'CORRECT' if is_correct else 'INCORRECT'
+        })
+        logger.info("LTM Trace: Logged attempt for %s: %s", node_id, is_correct)
+    except Exception as e:
+        logger.error("Failed to log LTM: %s", e)
 
-    st_folium(m, width=1000, height=500)
-    
-    # 3. Dispatch Command Center (Operational Pivot)
-    st.subheader("Dispatch Command Center")
-    if not df.empty:
-        col_list, col_action = st.columns([2, 1])
+def get_ltm_history(db: firestore.client, user_id: str, topic: str) -> List[Dict[str, Any]]:
+    """Fetches the last N quiz attempts for the topic to inform the Professor Agent."""
+    if not db: 
+        return []
+    try:
+        ltm_ref = get_ltm_collection_ref(db, user_id)
+        # Using firestore.Query.DESCENDING for ordering
+        query = ltm_ref.where('topic', '==', topic).order_by('timestamp', direction=firestore.Query.DESCENDING).limit(10)
         
-        with col_list:
-            st.dataframe(
-                df[['id', 'type', 'priority', 'dept', 'status', 'lat', 'lon']].sort_values(by="priority", ascending=False),
-                use_container_width=True,
-                hide_index=True
+        docs = query.stream()
+        history = []
+        for doc in docs:
+            data = doc.to_dict()
+            history.append({
+                'node': data.get('node_id'),
+                'status': data.get('status')
+            })
+        return history
+    except Exception as e:
+        logger.error("Failed to fetch LTM history: %s", e)
+        return []
+
+# --- SESSION STATE INITIALIZATION ---
+
+if 'curriculum' not in st.session_state:
+    st.session_state.curriculum = CurriculumManager()
+if 'agent_core' not in st.session_state:
+    st.session_state.agent_core = None
+if 'db_client' not in st.session_state:
+    st.session_state.db_client, st.session_state.user_id = init_firebase()
+if 'current_node' not in st.session_state:
+    st.session_state.current_node = None
+if 'current_content' not in st.session_state:
+    st.session_state.current_content = None
+if 'history' not in st.session_state:
+    st.session_state.history = []
+if 'initialized_model_name' not in st.session_state:
+    st.session_state.initialized_model_name = None
+if 'quiz_answers' not in st.session_state:
+    st.session_state.quiz_answers = {}
+
+db = st.session_state.db_client
+user_id = st.session_state.user_id
+
+# --- UI COMPONENTS ---
+
+def render_sidebar():
+    """Renders configuration, metrics, and audit log in the sidebar."""
+    
+    with st.sidebar:
+        st.header("Settings")
+        
+        with st.container(border=True):
+            st.subheader("Agent Configuration")
+            api_key_input = st.text_input("Gemini API Key", type="password", key="api_key_input")
+            model_name_select = st.selectbox(
+                "Model Selection",
+                options=[DEFAULT_MODEL, 'gemini-1.5-pro'],
+                index=0 if DEFAULT_MODEL == 'gemini-2.5-flash-preview-09-2025' else 1, 
+                key="model_name_select", 
+                help="Pro offers higher quality content, Flash offers lower latency."
             )
+
+            if st.button("Initialize Agents"):
+                if api_key_input:
+                    try:
+                        st.session_state.agent_core = AgentCore(api_key_input, model_name_select)
+                        st.session_state.initialized_model_name = model_name_select
+                        st.session_state.history.append("Agents Online (%s)" % model_name_select)
+                        st.success("Agents Online")
+                    except Exception as e:
+                        st.error("Initialization Failed: %s" % e)
+                else:
+                    st.warning("Please enter your API Key.")
+
+            if st.session_state.agent_core and st.session_state.initialized_model_name != model_name_select:
+                 st.warning("Model selection changed. Press 'Initialize Agents' to apply.")
+            elif st.session_state.agent_core:
+                 st.success("Agents Online (%s)" % st.session_state.initialized_model_name)
+            elif not api_key_input:
+                 st.warning("Please enter your API Key to initialize Agents.")
+
+
+        st.markdown("---")
+        st.subheader("System Status")
+        st.metric("Completed Modules", len(st.session_state.curriculum.completed_nodes))
+        st.caption("User ID: %s" % user_id)
         
-        with col_action:
-            st.markdown("#### Action Panel")
-            # Select Report
-            report_ids = df[df['status'] != 'Resolved']['id'].tolist()
-            if report_ids:
-                selected_id = st.selectbox("Select Report ID", report_ids)
-                new_status = st.selectbox("Update Status", ["In Progress", "Resolved", "False Alarm"])
+        # P3: Display Latency Metrics
+        if st.session_state.agent_core and st.session_state.agent_core.latency_metrics:
+            st.markdown("#### P3: Parallel Agent Tracing")
+            for node, latency in st.session_state.agent_core.latency_metrics.items():
+                st.metric("%s Latency" % node, "%.2f s" % latency)
+
+        with st.expander("Audit Log"):
+            for event in st.session_state.history:
+                st.text(event)
+
+def render_initialization():
+    """Renders the curriculum creation form."""
+    with st.form("init_form"):
+        st.subheader("Start New Curriculum")
+        topic_input = st.text_input("Enter Learning Goal (e.g., 'Thermodynamics')")
+        context_input = st.selectbox("Complexity Level", ["Undergraduate", "Graduate", "PhD"])
+        
+        load_existing = st.checkbox("Load existing curriculum for this topic?")
+        submitted = st.form_submit_button("Start/Generate Curriculum")
+        
+        if submitted and st.session_state.agent_core:
+            topic = topic_input.strip()
+            
+            if load_existing and db:
+                loaded_curriculum = load_curriculum_state(db, user_id, topic)
+                if loaded_curriculum:
+                    st.session_state.curriculum = loaded_curriculum
+                    st.session_state.history.append("Loaded existing session for: %s" % topic)
+                    st.success("Loaded existing session for: %s" % topic)
+                    st.rerun()
+                else:
+                    st.warning("No existing session found. Generating new one.")
+
+            if not st.session_state.curriculum.nodes:
+                with st.spinner("Architect Agent is designing the dependency graph..."):
+                    try:
+                        graph_data = st.session_state.agent_core.architect_agent(topic, context_input)
+                        if "error" in graph_data:
+                            st.error("Generation Error: %s" % graph_data['error'])
+                        else:
+                            st.session_state.curriculum.load_from_json(graph_data, topic, context_input)
+                            st.session_state.history.append("Graph initialized for: %s" % topic)
+                            if db:
+                                save_curriculum_state(db, user_id, st.session_state.curriculum)
+                            st.rerun()
+                    except Exception as e:
+                        st.error("Agent Failure: %s" % e)
+
+def render_module_view():
+    """Renders the main content view with graph, content, and quiz."""
+    
+    # Use tabs for a cleaner presentation of the core content
+    tab_graph, tab_content = st.tabs(["Knowledge Graph", "Current Module"])
+
+    with tab_graph:
+        st.subheader("Dependency Structure: %s" % st.session_state.curriculum.topic)
+        st.graphviz_chart(st.session_state.curriculum.get_dot_graph())
+        
+        available_nodes = [
+            (nid, data['label']) 
+            for nid, data in st.session_state.curriculum.nodes.items() 
+            if data['status'] == 'AVAILABLE'
+        ]
+        
+        if available_nodes and st.session_state.current_node is None:
+            st.info("Select an available module to begin:")
+            selected_node_id = st.selectbox(
+                "Available Modules", 
+                options=[n[0] for n in available_nodes],
+                format_func=lambda x: st.session_state.curriculum.nodes[x]['label']
+            )
+            
+            if st.button("Start Module"):
+                st.session_state.current_node = selected_node_id
+                st.session_state.quiz_answers = {} # Reset answers for new quiz
                 
-                if st.button("Update & Dispatch"):
-                    if st.session_state.city.update_status(selected_id, new_status):
-                        st.success(f"Report {selected_id} updated to '{new_status}'")
+                with st.spinner("Multi-Agent System working: Professor, Proctor, LaTeX, and Verifier..."):
+                    node_label = st.session_state.curriculum.nodes[selected_node_id]['label']
+                    ltm_history = get_ltm_history(db, user_id, st.session_state.curriculum.topic)
+                    content = st.session_state.agent_core.parallel_content_generation(node_label, ltm_history)
+                    st.session_state.current_content = content
+                    st.session_state.history.append("Started module: %s" % node_label)
+                st.rerun()
+        elif not available_nodes and not st.session_state.current_node:
+            st.success("All required modules completed!")
+
+    with tab_content:
+        if st.session_state.current_node:
+            node_id = st.session_state.current_node
+            node_label = st.session_state.curriculum.nodes[node_id]['label']
+            content = st.session_state.current_content
+            
+            st.header("Module: %s" % node_label)
+            
+            tab_lecture, tab_quiz = st.tabs(["Lecture Material", "Quiz"])
+            
+            with tab_lecture:
+                # P3: Hallucination Warning Metric (Evaluation)
+                audit = content.get('verifier_audit', {})
+                risk_score = audit.get('risk_score', 0.0)
+                flagged_reason = audit.get('flagged_reason', 'Evaluation pending.')
+                
+                col_audit_metric, col_audit_reason = st.columns([1, 2])
+                
+                with col_audit_metric:
+                    if risk_score > 0.3:
+                        st.error("🚨 Risk Score: %.2f" % risk_score)
+                    else:
+                        st.success("✅ Confidence: %.2f" % (1.0 - risk_score))
+                with col_audit_reason:
+                    st.caption("Auditor Note: %s" % flagged_reason)
+
+
+                st.markdown("---")
+                
+                # Custom Tool Output (LaTeX Equation)
+                latex_data = content.get('latex', {})
+                if latex_data.get('latex_equation'):
+                    st.subheader("Key Formula")
+                    st.latex(latex_data['latex_equation'])
+                    st.caption("Relevance: %s" % latex_data.get('reason'))
+                    st.markdown("---")
+                
+                st.markdown(content['lecture'])
+            
+            with tab_quiz:
+                quiz_items = content.get('quiz_items', [])
+                num_questions = len(quiz_items)
+                
+                if num_questions > 0:
+                    st.info("Quiz: Answer all %d questions to complete the module. Pass score: %.0f%% (7/10)" % (num_questions, PASS_THRESHOLD * 100))
+                    
+                    with st.form("quiz_form"):
+                        for i, item in enumerate(quiz_items):
+                            st.markdown("---")
+                            st.markdown("**%d. %s**" % (i + 1, item['question']))
+                            
+                            user_choice = st.radio(
+                                "Select Answer:", 
+                                options=item.get('options', ['A', 'B', 'C', 'D']), 
+                                index=st.session_state.quiz_answers.get(i, 0),
+                                key="q_%d" % i
+                            )
+                            st.session_state.quiz_answers[i] = item.get('options', ['A', 'B', 'C', 'D']).index(user_choice)
+
+                        submitted = st.form_submit_button("Submit Final Quiz")
+
+                    if submitted:
+                        # 1. Calculate Score
+                        correct_count = 0
+                        for i, item in enumerate(quiz_items):
+                            user_selected_index = st.session_state.quiz_answers.get(i, -1) 
+                            if user_selected_index == item['correct_option_index']:
+                                correct_count += 1
+                        
+                        score_percentage = correct_count / num_questions
+                        is_pass = score_percentage >= PASS_THRESHOLD
+
+                        # 2. A2A Call Setup
+                        verifier_audit = content.get('verifier_audit', {})
+                        
+                        # 3. Trigger Evaluator Agent
+                        with st.spinner("Processing results and checking for remediation..."):
+                            remedial_plan = st.session_state.agent_core.evaluator_agent(
+                                node_label, 
+                                score_percentage, 
+                                verifier_audit # A2A SIGNAL
+                            )
+                        
+                        # 4. Handle Results (Pass/Fail)
+                        if is_pass:
+                            st.balloons()
+                            st.success("Module Passed! Score: %.0f%% (%d/%d)" % (score_percentage * 100, correct_count, num_questions))
+                            log_quiz_attempt(db, user_id, node_id, True)
+                            st.session_state.curriculum.mark_completed(node_id)
+                        else:
+                            st.error("Module Failed. Score: %.0f%% (%d/%d). Needs Remediation." % (score_percentage * 100, correct_count, num_questions))
+                            log_quiz_attempt(db, user_id, node_id, False)
+                            
+                            if remedial_plan and not remedial_plan.get('error'):
+                                injected = st.session_state.curriculum.inject_remedial_node(
+                                    node_id, 
+                                    remedial_plan
+                                )
+                                if injected:
+                                    st.warning("Curriculum Updated: Added remedial node '%s'" % remedial_plan['remedial_node_label'])
+                                    st.session_state.history.append("Remediation injected: %s" % remedial_plan['remedial_node_label'])
+
+                        # 5. Cleanup and Rerun
+                        if db:
+                            save_curriculum_state(db, user_id, st.session_state.curriculum)
+                        st.session_state.current_node = None
+                        st.session_state.current_content = None
+                        st.session_state.quiz_answers = {}
+                        time.sleep(3)
                         st.rerun()
-            else:
-                st.info("No pending reports available for dispatch.")
+
+                else:
+                    st.warning("No quiz questions generated for this module.")
+
+# --- MAIN APP EXECUTION ---
+
+st.set_page_config(layout="wide")
+
+st.title("Dynamic Curriculum Graph Generator")
+st.markdown("A multi-agent higher education system featuring: **A2A Protocol, Parallel Agents, LTM, and Custom Tools**.")
+
+render_sidebar()
+
+if not st.session_state.curriculum.nodes:
+    if st.session_state.agent_core:
+        render_initialization()
+    else:
+        st.error("Agents not initialized. Please configure settings in the sidebar.")
+else:
+    render_module_view()
