@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from PIL import Image
@@ -36,17 +37,15 @@ class CivicAgentCore:
             logger.error(f"Agent Generation Failed: {e}")
             return {"error": str(e)}
 
-    # --- AGENT 1: THE INSPECTOR (Computer Vision) ---
     def vision_agent(self, image: Image) -> dict:
         """
         Analyzes an image to detect infrastructure failures.
-        Includes a RELEVANCE CHECK to filter out non-infrastructure images.
         """
         prompt = """
         You are a Civil Engineer Inspector. Analyze this image for municipal infrastructure issues.
         
         First, determine RELEVANCE. Is this image related to roads, drainage, waste, utilities, or public infrastructure?
-        If NO (e.g., a selfie, a cat, food, indoor furniture), set "is_relevant": false and "defect_type": "Irrelevant".
+        If NO (e.g., a selfie, a cat, food, indoor furniture), set "is_relevant": false.
         
         If YES:
         1. Identify the primary defect.
@@ -64,7 +63,6 @@ class CivicAgentCore:
         """
         return self._generate_json(prompt, image)
 
-    # --- AGENT 2: THE STRATEGIST (Prioritization) ---
     def prioritization_agent(self, defect_data: dict, location_context: str) -> dict:
         """
         Calculates a priority score based on defect severity and location context.
