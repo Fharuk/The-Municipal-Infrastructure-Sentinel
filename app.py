@@ -4,12 +4,7 @@ import pandas as pd
 import folium
 from streamlit_folium import st_folium
 import os
-import json
 import logging
-
-# Firebase Imports
-from firebase_admin import credentials, initialize_app, firestore
-from firebase_admin import auth as firebase_auth
 
 # Internal Modules
 from civic_agent_core import CivicAgentCore
@@ -19,87 +14,67 @@ from city_manager import CityManager
 st.set_page_config(layout="wide", page_title="Municipal Sentinel")
 logger = logging.getLogger(__name__)
 
-# --- FIREBASE INIT ---
-def init_firebase():
-    """Initializes Firebase."""
-    if 'firebase_initialized' in st.session_state:
-        return firestore.client(), st.session_state.user_id
+# --- SECURE INIT ---
+def get_api_key():
+    if "GEMINI_API_KEY" in st.secrets:
+        return st.secrets["GEMINI_API_KEY"]
+    env_key = os.environ.get("GEMINI_API_KEY")
+    if env_key:
+        return env_key
+    return None
 
-    try:
-        app_id = os.environ.get('__app_id', 'default-app-id')
-        firebase_config_str = os.environ.get('__firebase_config')
-        auth_token = os.environ.get('__initial_auth_token')
-        
-        if not firebase_config_str:
-            return None, "anonymous"
+api_key = get_api_key()
 
-        firebase_config = json.loads(firebase_config_str)
-        if not firestore._apps:
-            cred = credentials.Certificate(firebase_config)
-            initialize_app(cred)
-
-        db = firestore.client()
-        
-        # Auth (Simplified for demo)
-        user_id = "anonymous"
-        if auth_token:
-            try:
-                decoded = firebase_auth.verify_id_token(auth_token)
-                user_id = decoded['uid']
-            except: pass
-
-        st.session_state.app_id = app_id
-        st.session_state.user_id = user_id
-        st.session_state.firebase_initialized = True
-        return db, user_id
-    except Exception as e:
-        st.error(f"DB Error: {e}")
-        return None, None
-
-# Initialize
-db, user_id = init_firebase()
 if 'city' not in st.session_state:
-    st.session_state.city = CityManager(db)
-if 'agent' not in st.session_state:
-    st.session_state.agent = None
+    st.session_state.city = CityManager()
 
-# --- SIDEBAR ---
+if 'agent' not in st.session_state:
+    if api_key:
+        st.session_state.agent = CivicAgentCore(api_key)
+    else:
+        st.session_state.agent = None
+
+# --- SIDEBAR (Gamified) ---
 with st.sidebar:
     st.title("🛡️ Sentinel Control")
-    st.markdown("Enter Gemini API Key to enable AI analysis.")
-    api_key = st.text_input("API Key", type="password")
     
-    if st.button("Initialize System"):
-        if api_key:
-            st.session_state.agent = CivicAgentCore(api_key)
-            st.success(" AI Agents Online")
-        else:
-            st.warning("Key required.")
+    if st.session_state.agent:
+        st.success("System Online (Secure Key)")
+    else:
+        st.error("System Offline")
 
     st.markdown("---")
-    if db:
-        stats = st.session_state.city.get_stats()
-        st.metric("Active Reports", stats['total'])
-        st.metric("Critical Issues", stats['critical'])
-    else:
-        st.error("Database Offline")
+    st.subheader("📊 Live Impact")
+    stats = st.session_state.city.get_stats()
+    c1, c2 = st.columns(2)
+    c1.metric("Reports", stats['total'])
+    c2.metric("Critical", stats['critical'])
+    
+    st.markdown("---")
+    st.subheader("🏆 Top Reporters")
+    leaderboard = st.session_state.city.get_leaderboard()
+    if not leaderboard.empty:
+        st.dataframe(leaderboard, hide_index=True, use_container_width=True)
 
 # --- MAIN UI ---
 st.title("🏙️ Municipal Infrastructure Sentinel")
 st.markdown("AI-Powered Infrastructure Triage System. **Map Provider: OpenStreetMap**")
 
-tab_citizen, tab_gov = st.tabs(["📢 Citizen Reporter", "🗺️ Government Dashboard"])
+tab_citizen, tab_gov = st.tabs(["📢 Citizen Reporter", "🗺️ Government Command"])
 
-# --- TAB 1: REPORTING ---
+# --- TAB 1: CITIZEN REPORTING (Path A) ---
 with tab_citizen:
     col_input, col_analysis = st.columns([1, 1])
     
     with col_input:
         st.subheader("New Incident Report")
+        
+        # Gamification: Identity
+        reporter_name = st.text_input("Your Name (For Leaderboard)", value="Anonymous")
+        
         img_file = st.file_uploader("Upload Scene Photo", type=['jpg', 'png', 'jpeg'])
         
         st.caption("Location Metadata (Simulated GPS)")
-        # Default to a generic coordinate (e.g., Lagos)
         lat = st.number_input("Latitude", value=6.5244, format="%.4f")
         lon = st.number_input("Longitude", value=3.3792, format="%.4f")
         location_type = st.selectbox("Context", ["Highway", "Residential", "Market", "School Zone"])
@@ -107,59 +82,108 @@ with tab_citizen:
         submit_btn = st.button("Analyze & Submit")
 
     with col_analysis:
-        if submit_btn and img_file and st.session_state.agent:
-            image = Image.open(img_file)
-            st.image(image, caption="Evidence", width=300)
-            
-            with st.spinner("AI Vision analyzing defect..."):
-                vision_result = st.session_state.agent.vision_agent(image)
-                st.info(f"Detected: **{vision_result.get('defect_type')}**")
+        if submit_btn and img_file:
+            if not st.session_state.agent:
+                st.error("AI Agent not initialized.")
+            else:
+                image = Image.open(img_file)
+                st.image(image, caption="Evidence", width=300)
                 
-            with st.spinner("AI Planner calculating priority..."):
-                priority_result = st.session_state.agent.prioritization_agent(vision_result, location_type)
-                
-                # Save to Firestore
-                report = st.session_state.city.add_report(lat, lon, vision_result, priority_result, user_id)
-                
-                if report:
-                    if report['priority'] > 80:
-                        st.error(f"🚨 Priority: {report['priority']} (Immediate)")
-                    else:
-                        st.success(f"✅ Priority: {report['priority']} (Logged)")
-                    st.write(f"**Justification:** {priority_result.get('justification')}")
+                with st.spinner("AI Vision analyzing defect..."):
+                    vision_result = st.session_state.agent.vision_agent(image)
+                    
+                    # 1. Relevance Check
+                    if not vision_result.get('is_relevant', True):
+                        st.error("❌ Image Rejected: Not identified as municipal infrastructure.")
+                        st.stop()
 
-# --- TAB 2: MAP DASHBOARD ---
+                    defect = vision_result.get('defect_type', 'Unknown')
+                    severity = vision_result.get('severity_score', 0)
+                    st.info(f"Detected: **{defect}** | Severity: **{severity}/10**")
+                    
+                with st.spinner("AI Planner calculating priority..."):
+                    priority_result = st.session_state.agent.prioritization_agent(vision_result, location_type)
+                    
+                    # Save to Memory
+                    report = st.session_state.city.add_report(lat, lon, vision_result, priority_result, reporter_name)
+                    
+                    if report:
+                        # Gamification: Celebration
+                        if report['priority'] > 80:
+                            st.balloons()
+                            st.error(f"🚨 Priority: {report['priority']} (Immediate)")
+                        else:
+                            st.success(f"✅ Priority: {report['priority']} (Logged)")
+                        
+                        st.write(f"**Justification:** {priority_result.get('justification')}")
+                        st.info(f"Thank you, {reporter_name}! You earned +10 Impact Points.")
+
+# --- TAB 2: GOVERNMENT DASHBOARD (Path B) ---
 with tab_gov:
-    st.subheader("Operational Heatmap (OSM)")
+    st.subheader("Operational Heatmap")
     
-    # 1. Map Visualization
+    # 1. Filters (Operational Pivot)
     df = st.session_state.city.get_dataframe()
     
+    col_filter1, col_filter2 = st.columns(2)
+    with col_filter1:
+        type_filter = st.multiselect("Filter by Defect Type", options=df['type'].unique() if not df.empty else [])
+    with col_filter2:
+        status_filter = st.multiselect("Filter by Status", options=["New", "Pending", "In Progress", "Resolved"])
+
+    # Apply Filters
+    if not df.empty:
+        if type_filter:
+            df = df[df['type'].isin(type_filter)]
+        if status_filter:
+            df = df[df['status'].isin(status_filter)]
+
+    # 2. Map
     if not df.empty:
         center_lat = df['lat'].mean()
         center_lon = df['lon'].mean()
     else:
         center_lat, center_lon = 6.5244, 3.3792
 
-    # Create Map (OpenStreetMap is default tile)
     m = folium.Map(location=[center_lat, center_lon], zoom_start=12)
     
     if not df.empty:
         for _, row in df.iterrows():
             color = "red" if row['priority'] > 80 else "orange" if row['priority'] > 50 else "green"
+            # Add Status to popup
+            popup_html = f"<b>{row['type']}</b><br>Priority: {row['priority']}<br>Status: {row['status']}<br>ID: {row['id']}"
             folium.Marker(
                 [row['lat'], row['lon']],
-                popup=f"<b>{row['type']}</b><br>Priority: {row['priority']}",
-                tooltip=f"Severity: {row['severity']}",
+                popup=popup_html,
+                tooltip=f"{row['type']} ({row['severity']}/10)",
                 icon=folium.Icon(color=color, icon="info-sign")
             ).add_to(m)
 
     st_folium(m, width=1000, height=500)
     
-    # 2. Data Table
+    # 3. Dispatch Command Center (Operational Pivot)
+    st.subheader("Dispatch Command Center")
     if not df.empty:
-        st.dataframe(
-            df[['type', 'priority', 'dept', 'status', 'lat', 'lon']].sort_values(by="priority", ascending=False),
-            use_container_width=True,
-            hide_index=True
-        )
+        col_list, col_action = st.columns([2, 1])
+        
+        with col_list:
+            st.dataframe(
+                df[['id', 'type', 'priority', 'dept', 'status', 'lat', 'lon']].sort_values(by="priority", ascending=False),
+                use_container_width=True,
+                hide_index=True
+            )
+        
+        with col_action:
+            st.markdown("#### Action Panel")
+            # Select Report
+            report_ids = df[df['status'] != 'Resolved']['id'].tolist()
+            if report_ids:
+                selected_id = st.selectbox("Select Report ID", report_ids)
+                new_status = st.selectbox("Update Status", ["In Progress", "Resolved", "False Alarm"])
+                
+                if st.button("Update & Dispatch"):
+                    if st.session_state.city.update_status(selected_id, new_status):
+                        st.success(f"Report {selected_id} updated to '{new_status}'")
+                        st.rerun()
+            else:
+                st.info("No pending reports available for dispatch.")

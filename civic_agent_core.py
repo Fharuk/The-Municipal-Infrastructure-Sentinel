@@ -22,7 +22,7 @@ class CivicAgentCore:
         }
 
     def _generate_json(self, prompt: str, image: Image = None) -> dict:
-        """Helper to handle text-only or multimodal (image+text) requests."""
+        """Helper to handle text-only or multimodal requests."""
         config = genai.GenerationConfig(response_mime_type="application/json")
         try:
             inputs = [prompt, image] if image else [prompt]
@@ -40,21 +40,26 @@ class CivicAgentCore:
     def vision_agent(self, image: Image) -> dict:
         """
         Analyzes an image to detect infrastructure failures.
+        Includes a RELEVANCE CHECK to filter out non-infrastructure images.
         """
         prompt = """
         You are a Civil Engineer Inspector. Analyze this image for municipal infrastructure issues.
         
-        Tasks:
-        1. Identify the primary defect (Pothole, Blocked Drainage, Heap of Trash, Fallen Pole, or 'None').
-        2. Estimate Severity (1-10) based on size and obstruction.
-        3. Estimate Repair Complexity (Low, Medium, High).
+        First, determine RELEVANCE. Is this image related to roads, drainage, waste, utilities, or public infrastructure?
+        If NO (e.g., a selfie, a cat, food, indoor furniture), set "is_relevant": false and "defect_type": "Irrelevant".
+        
+        If YES:
+        1. Identify the primary defect.
+        2. Estimate Severity (1-10).
+        3. Describe technical details.
         
         Output JSON:
         {
+            "is_relevant": boolean,
             "defect_type": "string",
             "severity_score": int,
-            "description": "short technical description",
-            "estimated_material_needed": "string (e.g., 'Asphalt', 'Excavator')"
+            "description": "string",
+            "estimated_material_needed": "string"
         }
         """
         return self._generate_json(prompt, image)
@@ -68,16 +73,16 @@ class CivicAgentCore:
         You are a City Planner. Prioritize this repair request.
         
         Defect: {defect_data.get('defect_type')} (Severity: {defect_data.get('severity_score')})
-        Location Context: {location_context} (e.g., 'Main Highway', 'School Zone', 'Back Alley')
+        Location Context: {location_context}
         
-        Rules:
-        - High traffic areas (Highways) multiply urgency.
-        - Safety risks (School zones) multiply urgency.
+        Task: Calculate 'priority_index' (0-100).
+        - Severity * Context Multiplier = Priority.
+        - Highway/School Zone = High Multiplier.
         
         Output JSON:
         {{
-            "priority_index": float (0.0 to 100.0),
-            "justification": "Why this priority level?",
+            "priority_index": float,
+            "justification": "Short reason for priority level.",
             "assigned_department": "Works / Sanitation / Power"
         }}
         """
